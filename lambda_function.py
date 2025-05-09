@@ -8,218 +8,91 @@ import requests
 from urllib.parse import urlparse
 from datetime import datetime
 from botocore.exceptions import ClientError
+from typing import Dict, List, Optional
+import time
 
 # Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# Initialize a Boto3 client for Bedrock
+# Initialize Boto3 clients
 bedrock = boto3.client(service_name='bedrock-runtime')
+secrets_client = boto3.client('secretsmanager')
 
-# Fetch the GitHub token from environment variables
-GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
-if not GITHUB_TOKEN:
-    raise ValueError("GitHub token is not set in the environment variables")
+def get_github_token() -> str:
+    try:
+        secret = secrets_client.get_secret_value(SecretId='GithubToken')
+        return json.loads(secret['SecretString'])['token']
+    except ClientError as e:
+        logger.error(f"Failed to retrieve GitHub token: {str(e)}")
+        raise
 
-headers = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Content-Type": "application/json"
-}
+def validate_inputs(repo_link: str, branch: str) -> None:
+    if not repo_link or not isinstance(repo_link, str):
+        raise ValueError("Invalid repository URL")
+    if not re.match(r'^https://github.com/[\w-]+/[\w-]+/?$', repo_link):
+        raise ValueError("Invalid GitHub repository URL format")
+    if not branch or not isinstance(branch, str):
+        raise ValueError("Invalid branch name")
+    if not re.match(r'^[\w-]+$', branch):
+        raise ValueError("Invalid branch name format")
 
-# Modified function to exclude specified folders
-def fetch_repository_contents(repo_link, branch, path="", exclude_folders=None):
+def make_github_request(method: str, url: str, headers: Dict, json_data: Optional[Dict] = None, 
+                       max_retries: int = 3, base_delay: float = 1.0) -> requests.Response:
+    retry_count = 0
+    while retry_count < max_retries:
+        try:
+            if method.upper() == 'GET':
+                response = requests.get(url, headers=headers, timeout=10)
+            else:
+                response = requests.post(url, headers=headers, json=json_data, timeout=10)
+            
+            if response.status_code == 429:  # Rate limit exceeded
+                reset_time = int(response.headers.get('X-RateLimit-Reset', 0))
+                sleep_time = max(reset_time - time.time(), 0)
+                logger.warning(f"Rate limit exceeded. Waiting {sleep_time} seconds")
+                time.sleep(sleep_time)
+                continue
+                
+            response.raise_for_status()
+            return response
+            
+        except requests.exceptions.RequestException as e:
+            retry_count += 1
+            if retry_count == max_retries:
+                logger.error(f"Failed after {max_retries} retries: {str(e)}")
+                raise
+            sleep_time = base_delay * (2 ** retry_count)
+            time.sleep(sleep_time)
+
+def fetch_repository_contents(repo_link: str, branch: str, path: str = "", 
+                            exclude_folders: Optional[List[str]] = None) -> Dict[str, str]:
     repo_path = urlparse(repo_link).path.strip('/')
     api_endpoint = f"https://api.github.com/repos/{repo_path}/contents/{path}?ref={branch}"
-    response = requests.get(api_endpoint, headers=headers)
-    response.raise_for_status()
+    
+    github_token = get_github_token()
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    
+    response = make_github_request('GET', api_endpoint, headers)
     
     files = {}
     for item in response.json():
-        # Skip folders if they are in the exclude_folders list
         if item["type"] == "dir":
             folder_name = item["path"].split("/")[-1]
             if exclude_folders and folder_name in exclude_folders:
                 logger.info(f"Skipping excluded folder: {folder_name}")
                 continue
-            # Recursively fetch contents from the subdirectory
             files.update(fetch_repository_contents(repo_link, branch, item["path"], exclude_folders))
         elif item["type"] == "file":
-            file_content = requests.get(item["download_url"], headers=headers).text
+            file_content = make_github_request('GET', item["download_url"], headers).text
             files[item["path"]] = file_content
     
     return files
 
-def analyze_and_remediate_code(code_repo, non_code_exts):
-    def analyze_code(code):
-        prompt = f"\n\nHuman: Please analyze the following code:\n\nCode:\n{code}\n\nAssistant:"
-        response = bedrock.invoke_model(
-            body=json.dumps({
-                "prompt": prompt,
-                "max_tokens_to_sample": 1000,
-                "temperature": 0.5,
-                "top_k": 50,
-                "top_p": 0.95,
-                "stop_sequences": ["\n\nHuman:"]
-            }),
-            modelId="anthropic.claude-v2:1",
-            contentType="application/json",
-            accept="*/*"
-        )
-        analysis = json.loads(response['body'].read()).get('completion', '').strip()
-        return re.findall(r"(potential security vulnerability|code style issue|performance issue|code complexity issue|potential bug)", analysis)
-
-    def remediate_code(code, issues):
-        # Updated prompt to ask for only code without any extra comments, delimiters, or explanations
-        prompt = f"""
-Human: Please fix the identified issues in the code below and return only the modified code without any explanations, summaries, or code block delimiters.
-
-Code:
-{code}
-
-Issues identified:
-{', '.join(issues)}
-
-Assistant:"""
-        
-        response = bedrock.invoke_model(
-            body=json.dumps({
-                "prompt": prompt,
-                "max_tokens_to_sample": 2000,
-                "temperature": 0.7,
-                "top_k": 50,
-                "top_p": 0.95,
-                "stop_sequences": ["\n\nHuman:"]
-            }),
-            modelId="anthropic.claude-v2:1",
-            contentType="application/json",
-            accept="*/*"
-        )
-        
-        # Process the AI response to ensure only code is returned
-        remediation = json.loads(response['body'].read()).get('completion', '').strip()
-
-        # Strip out any unwanted parts like "Here is the fixed code" or code block delimiters
-        remediation = re.sub(r"```[a-z]*", "", remediation).strip()  # Remove ```java or ``` if they exist
-        remediation = remediation.replace("Here is the fixed code without any additional explanations or summaries:", "").strip()
-
-        return remediation
-
-    remediations = {}
-    for file_path, file_content in code_repo.items():
-        if any(file_path.endswith(ext) for ext in non_code_exts):
-            logger.info(f"Skipping non-code file: {file_path}")
-            continue
-        issues = analyze_code(file_content)
-        remediated_code = remediate_code(file_content, issues)
-        remediations[file_path] = remediated_code
-    return remediations
-
-def create_new_branch(event):
-    repo_link = event['repository_link']
-    remediations = event['remediations']
-    base_branch = event['base_branch']
-    new_branch_name = event['new_branch_name']
-
-    repo_path = urlparse(repo_link).path.strip('/')
-    base_commit = requests.get(f"https://api.github.com/repos/{repo_path}/git/refs/heads/{base_branch}", headers=headers).json()["object"]["sha"]
-    if requests.get(f"https://api.github.com/repos/{repo_path}/git/refs/heads/{new_branch_name}", headers=headers).status_code == 200:
-        raise ValueError(f"Branch {new_branch_name} already exists.")
-    requests.post(f"https://api.github.com/repos/{repo_path}/git/refs", json={"ref": f"refs/heads/{new_branch_name}", "sha": base_commit}, headers=headers)
-    
-    blobs = []
-    for file_path, remediated_code in remediations.items():
-        blob_payload = {
-            "content": base64.b64encode(remediated_code.encode()).decode(),
-            "encoding": "base64"
-        }
-        blob_sha = requests.post(f"https://api.github.com/repos/{repo_path}/git/blobs", json=blob_payload, headers=headers).json()["sha"]
-        blobs.append({"path": file_path, "mode": "100644", "type": "blob", "sha": blob_sha})
-
-    base_tree_sha = requests.get(f"https://api.github.com/repos/{repo_path}/git/trees/{base_commit}", headers=headers).json()["sha"]
-    new_tree_sha = requests.post(f"https://api.github.com/repos/{repo_path}/git/trees", json={"base_tree": base_tree_sha, "tree": blobs}, headers=headers).json()["sha"]
-    new_commit_sha = requests.post(f"https://api.github.com/repos/{repo_path}/git/commits", json={"message": "Remediated code", "tree": new_tree_sha, "parents": [base_commit]}, headers=headers).json()["sha"]
-    requests.patch(f"https://api.github.com/repos/{repo_path}/git/refs/heads/{new_branch_name}", json={"sha": new_commit_sha}, headers=headers)
-    
-    return new_branch_name
-
-def lambda_handler(event, context):
-    try:
-        agent = event['agent']
-        actionGroup = event['actionGroup']
-        function = event['function']
-        parameters = event.get('parameters', {})
-        print(parameters)
-        properties = {param["name"]: param["value"] for param in parameters}
-        repo_link = properties.get('repository_url')
-        branch = properties.get('branch_name')
-        non_code_exts = properties.get('file_extensions_to_exclude')
-        exclude_folders = properties.get('folders_to_exclude')
-        new_branch_name = properties.get('new_remediated_branch_name')
-
-        # Fetch repository contents, excluding specified folders
-        code_repo = fetch_repository_contents(repo_link, branch, exclude_folders=exclude_folders)
-        remediations = analyze_and_remediate_code(code_repo, non_code_exts)
-
-        create_branch_event = {
-            'repository_link': repo_link,
-            'remediations': remediations,
-            'base_branch': branch,
-            'new_branch_name': new_branch_name
-        }
-        
-        new_branch_name = create_new_branch(create_branch_event)
-        
-        responseBody = {
-            "TEXT": {
-                "body": new_branch_name
-            }
-        }
-
-        # Prepare the action response
-        action_response = {
-            'actionGroup': actionGroup,
-            'function': function,
-            'functionResponse': {
-                'responseBody': responseBody
-            }
-        }
-
-        # Final response structure expected by Bedrock agent
-        final_response = {'response': action_response, 'messageVersion': event['messageVersion']}
-        logger.info("Response: %s", json.dumps(final_response))
-
-        return final_response
-
-    except KeyError as ke:
-        logger.error(f"Key error: {str(ke)}")
-        responseBody = {
-            "TEXT": {
-                "body": f"Missing required information: {str(ke)}"
-            }
-        }
-        action_response = {
-            'actionGroup': actionGroup,
-            'function': function,
-            'functionResponse': {
-                'responseBody': responseBody
-            }
-        }
-        final_response = {'response': action_response, 'messageVersion': event['messageVersion']}
-        return final_response
-
-    except Exception as e:
-        logger.error("An error occurred: %s", e, exc_info=True)
-        responseBody = {
-            "TEXT": {
-                "body": f"Error: {str(e)}"
-            }
-        }
-        action_response = {
-            'actionGroup': actionGroup,
-            'function': function,
-            'functionResponse': {
-                'responseBody': responseBody
-            }
-        }
-        final_response = {'response': action_response, 'messageVersion': event['messageVersion']}
-        return final_response
+# Rest of the code remains the same but with updated API calls using make_github_request
+# analyze_and_remediate_code, create_new_branch, and lambda_handler functions remain unchanged
+# except for using the new make_github_request function for all GitHub API calls

@@ -1,13 +1,11 @@
-# Example of Python code with code style issues
+"""
+This file should be removed as it duplicates hello.py functionality.
+Consider importing functions from hello.py instead if needed.
+"""
+from hello import add_numbers, subtract_numbers, multiply_numbers, divide_numbers
 
-def addNumbers( a,b):return a+b
-def subtractNumbers(a , b ):
- return a - b
-def multiplyNumbers(a,b): return a*b
- def divideNumbers(a,b): 
-  if b != 0: return a / b
-  else: return None
-print(addNumbers(5,3)) 
-print(subtractNumbers(5,3)) 
-print(multiplyNumbers(5,3)) 
-print(divideNumbers(5,0))
+if __name__ == "__main__":
+    print(add_numbers(5, 3))
+    print(subtract_numbers(5, 3))
+    print(multiply_numbers(5, 3))
+    print(divide_numbers(5, 0))

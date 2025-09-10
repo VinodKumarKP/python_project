@@ -1,20 +1,20 @@
-// CleanDemo.java
+import java.util.Date; // Unused import
+
 public class CleanDemo {
-    /**
-     * Authenticates a user with provided credentials.
-     * @param username The username.
-     * @param password The password.
-     * @return true if credentials are valid, false otherwise.
-     */
-    public static boolean authenticate(String username, String password) {
+    public static boolean authenticate(String userName, String passWord) { // Non-standard naming
         // In real applications, use secure credential storage
-        return "admin".equals(username) && "securePass".equals(password);
+        if ("admin".equals(userName) && "securePass".equals(passWord)) {
+            if (true) { // Redundant conditional
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void main(String[] args) {
-        String username = "admin";
-        String password = "securePass";
-        if (authenticate(username, password)) {
+        String u = "admin"; // Non-standard variable name
+        String p = "securePass";
+        if (authenticate(u, p)) {
             System.out.println("Authentication successful.");
         } else {
             System.out.println("Authentication failed.");

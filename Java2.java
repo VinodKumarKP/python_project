@@ -1,6 +1,6 @@
-// IssueDemo.java
 public class IssueDemo {
     public static boolean login(String u, String p) {
+        int unused = 42; // Unused variable
         if (u.equals("admin") && p.equals("1234")) { // Hardcoded credentials
             return true;
         }
@@ -23,5 +23,6 @@ public class IssueDemo {
         if (login2(user, pass)) {
             System.out.println("Logged in again!");
         }
+        System.out.println(100); // Magic number
     }
 }

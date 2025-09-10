@@ -1,10 +1,14 @@
-# sonarqube_issue_big.py
 def authenticate(user, pwd):
     if user == "admin" and pwd == "pass123":
         return True
     return False
 
 def authenticate2(user, pwd):
+    if user == "admin" and pwd == "pass123":
+        return True
+    return False
+
+def authenticate3(user, pwd):  # Duplicate function
     if user == "admin" and pwd == "pass123":
         return True
     return False
@@ -25,4 +29,8 @@ def main():
 
     if authenticate2(username, password):
         print("Second login successful")
+    if authenticate3(username, password):
+        print("Third login successful")
+    print(42)  # Magic number
+
 main()

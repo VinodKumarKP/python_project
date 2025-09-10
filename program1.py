@@ -1,6 +1,6 @@
-# remediation_issue_big.py
 import sys
 import math
+import random  # Unused import
 
 def doStuff(a, b, c):
     x = a + b
@@ -13,6 +13,8 @@ def doStuff(a, b, c):
         result.append(y * j)
     for k in range(3):
         result.append(z * k)
+    for l in range(2):  # Added more lines to make function longer
+        result.append(a * l)
     return result
 
 def main():
